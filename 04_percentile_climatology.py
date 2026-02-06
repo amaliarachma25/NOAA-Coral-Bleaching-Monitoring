@@ -1,3 +1,18 @@
+"""
+NOAA Coral Bleaching Integrated Analysis Tool
+=============================================
+
+This script performs the final stage of the analysis pipeline:
+1. Calculates Climatology Statistics (MMM - Maximum Monthly Mean) from global NetCDF data.
+2. Analyzes daily XYZ data (SST, HotSpot, DHW) for specific sites.
+3. Generates a comprehensive text report containing:
+   - Site Metadata
+   - Climatology Baselines
+   - Daily Bleaching Alert Area (BAA) and Degree Heating Weeks (DHW).
+
+Methodology based on NOAA Coral Reef Watch v3.1.
+"""
+
 import pandas as pd
 import numpy as np
 import os
@@ -9,97 +24,119 @@ import rioxarray
 import geopandas as gpd
 import warnings
 
-# Abaikan warning
+# Suppress warnings
 warnings.filterwarnings("ignore")
 
-# ==============================================================================
-# 1. KONFIGURASI PATH & FILE
-# ==============================================================================
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
 
-# --- KONFIGURASI CLIMATOLOGY (INPUT) ---
-base_dir_clim = r"D:\magang\CORAL\output\01_climatology"
-input_nc = os.path.join(base_dir_clim, "00_Raw_Climatology", "ct5km_climatology_v3.1.nc")
-shp_base_dir = os.path.join(base_dir_clim, "SHP_SITE")
+# Base Directory (Current Folder)
+BASE_DIR = os.getcwd()
 
-# Mapping Kode Wilayah ke File Shapefile
-regions_shp = {
-    "GM": os.path.join(shp_base_dir, "gili_matra_buffer_5km.shp"),
-    "GN": os.path.join(shp_base_dir, "gita_nada_buffer_5km.shp"),
-    "NP": os.path.join(shp_base_dir, "nusa_penida_buffer_5km.shp")
+# Directory Structure
+DIRS = {
+    # INPUT 1: Raw Global Climatology NetCDF
+    "clim_input": os.path.join(BASE_DIR, "01_Global_Input"),
+    
+    # INPUT 2: Shapefiles for masking
+    "shp_input": os.path.join(BASE_DIR, "input_shapefiles"),
+    
+    # INPUT 3: Daily masked XYZ files (Output from previous script)
+    "xyz_input": os.path.join(BASE_DIR, "03_XYZ_Output"),
+    
+    # OUTPUT: Final Report Location
+    "final_output": os.path.join(BASE_DIR, "04_Final_Reports")
 }
 
-# --- KONFIGURASI DATA HARIAN (INPUT) ---
-INPUT_FOLDER_XYZ = "03_Masking_Site"  # Folder berisi file .xyz harian
+# Climatology File Name
+CLIM_FILENAME = "ct5km_climatology_v3.1.nc"
 
-# --- KONFIGURASI OUTPUT ---
-OUTPUT_FOLDER = "NOAA_Final_Reports_Integrated"
+# Site Configuration (Code: Shapefilename)
+SITES = {
+    "GM": "gili_matra_buffer_5km.shp",
+    "GN": "gita_nada_buffer_5km.shp",
+    "NP": "nusa_penida_buffer_5km.shp"
+}
 
-# Variabel Bulan dalam NetCDF
-month_vars = [
+# Site Full Names for Report
+SITE_FULLNAMES = {
+    "GM": "Gili Matra", 
+    "GN": "Gita Nada", 
+    "NP": "Nusa Penida"
+}
+
+# Region of Interest (ROI) for Climatology Slicing
+ROI_BOUNDS = {
+    "lat_min": -9.2, "lat_max": -8.2,
+    "lon_min": 115.3, "lon_max": 116.3
+}
+
+# NetCDF Variable Names for Months
+MONTH_VARS = [
     'sst_clim_january', 'sst_clim_february', 'sst_clim_march', 
     'sst_clim_april', 'sst_clim_may', 'sst_clim_june',
     'sst_clim_july', 'sst_clim_august', 'sst_clim_september', 
     'sst_clim_october', 'sst_clim_november', 'sst_clim_december'
 ]
 
-# Koordinat Slicing (Lombok Area)
-lat_min, lat_max = -9.2, -8.2
-lon_min, lon_max = 115.3, 116.3
-
-# ==============================================================================
-# 2. MODUL CLIMATOLOGY (XARRAY & GEOPANDAS)
-# ==============================================================================
+# ==========================================
+# 2. MODULE: CLIMATOLOGY CALCULATION
+# ==========================================
 def calculate_climatology_data():
     """
-    Menghitung MMM dan Monthly Mean dari file NetCDF menggunakan Shapefile.
-    Mengembalikan dictionary berisi data klimatologi per site.
+    Calculates Maximum Monthly Mean (MMM) and Monthly Means from NetCDF.
+    Returns a dictionary of results per site.
     """
     print("\n" + "="*50)
-    print("   MEMULAI PERHITUNGAN CLIMATOLOGY (NetCDF)")
+    print("   STEP 1: CALCULATING CLIMATOLOGY (NetCDF)")
     print("="*50)
 
-    if not os.path.exists(input_nc):
-        print(f"❌ File NC tidak ditemukan: {input_nc}")
+    input_path = os.path.join(DIRS["clim_input"], CLIM_FILENAME)
+
+    if not os.path.exists(input_path):
+        print(f"❌ ERROR: Climatology file not found: {input_path}")
+        print("   Please download 'ct5km_climatology_v3.1.nc' into '01_Global_Input'.")
         return {}
 
-    # Buka Dataset
     try:
-        ds = xr.open_dataset(input_nc)
+        ds = xr.open_dataset(input_path)
         
-        # Normalisasi nama dimensi
+        # Normalize coordinates
         if 'lat' in ds.coords: ds = ds.rename({'lat': 'latitude', 'lon': 'longitude'})
         ds = ds.sortby(['latitude', 'longitude'])
 
-        # Slicing Area Lombok (Hemat RAM)
-        print("✂️  Memotong area Lombok...")
-        if ds.latitude[0] > ds.latitude[-1]:
-            ds_lombok = ds.sel(latitude=slice(lat_max, lat_min), longitude=slice(lon_min, lon_max))
-        else:
-            ds_lombok = ds.sel(latitude=slice(lat_min, lat_max), longitude=slice(lon_min, lon_max))
-        
-        ds_lombok = ds_lombok.rio.set_spatial_dims("longitude", "latitude").rio.write_crs("EPSG:4326")
+        # Slice ROI to save RAM
+        print("✂️  Slicing ROI...")
+        lat_slice = slice(ROI_BOUNDS["lat_min"], ROI_BOUNDS["lat_max"])
+        if ds.latitude[0] > ds.latitude[-1]: # Handle descending latitude
+            lat_slice = slice(ROI_BOUNDS["lat_max"], ROI_BOUNDS["lat_min"])
+            
+        ds_roi = ds.sel(latitude=lat_slice, longitude=slice(ROI_BOUNDS["lon_min"], ROI_BOUNDS["lon_max"]))
+        ds_roi = ds_roi.rio.set_spatial_dims("longitude", "latitude").rio.write_crs("EPSG:4326")
         
         clim_results = {}
 
-        for code, shp_path in regions_shp.items():
+        for code, shp_name in SITES.items():
+            shp_path = os.path.join(DIRS["shp_input"], shp_name)
+            
             if not os.path.exists(shp_path):
-                print(f"⚠️  Shapefile tidak ditemukan untuk {code}: {shp_path}")
+                print(f"⚠️  Shapefile not found: {shp_name}")
                 continue
 
-            print(f"🔄 Processing Climatology: {code}")
+            print(f"🔄 Processing: {code}")
             gdf = gpd.read_file(shp_path)
             
-            # Samakan CRS
-            if gdf.crs != ds_lombok.rio.crs:
-                gdf = gdf.to_crs(ds_lombok.rio.crs)
+            if gdf.crs != ds_roi.rio.crs:
+                gdf = gdf.to_crs(ds_roi.rio.crs)
 
             try:
-                # Clip NetCDF dengan Shapefile
-                clipped = ds_lombok.rio.clip(gdf.geometry, gdf.crs, drop=True)
+                # Clip NetCDF with Shapefile
+                clipped = ds_roi.rio.clip(gdf.geometry, gdf.crs, drop=True)
                 
                 site_means = []
-                # Loop 12 Bulan
-                for var_name in month_vars:
+                # Loop 12 Months
+                for var_name in MONTH_VARS:
                     if var_name in clipped.data_vars:
                         val = clipped[var_name].mean(dim=['latitude', 'longitude'], skipna=True).item()
                         site_means.append(val)
@@ -116,7 +153,7 @@ def calculate_climatology_data():
                     }
                     print(f"   ✅ {code} MMM: {mmm_value:.4f}")
                 else:
-                    print(f"   ❌ {code}: Data bulan tidak lengkap.")
+                    print(f"   ❌ {code}: Incomplete monthly data.")
 
             except Exception as e:
                 print(f"   ❌ Error processing {code}: {e}")
@@ -128,48 +165,45 @@ def calculate_climatology_data():
         print(f"CRITICAL ERROR CLIMATOLOGY: {e}")
         return {}
 
-# ==============================================================================
-# 3. MODUL HARIAN (PANDAS & NUMPY) -- FIXED BAA LOGIC --
-# ==============================================================================
+# ==========================================
+# 3. MODULE: DAILY ANALYSIS (LOGIC)
+# ==========================================
 class RegionAnalyzer:
     def __init__(self, name, code, climatology_data):
         self.name = name
         self.code = code
-        self.stress_window = deque(maxlen=84) # 12 minggu untuk DHW
-        self.baa_window = deque(maxlen=7)     # [BARU] 7 hari untuk BAA Composite
+        self.stress_window = deque(maxlen=84) # 12 weeks (84 days) for DHW
+        self.baa_window = deque(maxlen=7)     # 7 days for BAA Composite
         self.center_lat = 0.0
         self.center_lon = 0.0
         self.coord_set = False
         
-        # Data Climatology dari Tahap 1
+        # Load Climatology Data
         self.mmm = climatology_data.get('mmm', 0.0)
         self.monthly_means = climatology_data.get('monthly_means', [0.0]*12)
 
     def process_day(self, date_obj, file_hs, file_sst=None, file_ssta=None):
         try:
-            # 1. Baca HS
+            # 1. Read HotSpot (HS) - Mandatory
             df_hs = pd.read_csv(file_hs, sep='\s+', header=None, names=['lon', 'lat', 'val'])
             df_hs = df_hs.dropna()
             if df_hs.empty: return None
 
-            # Ambil koordinat pusat (Rata-rata seluruh piksel dalam mask)
+            # Set polygon center coordinates (once)
             if not self.coord_set:
                 self.center_lon = df_hs['lon'].mean()
                 self.center_lat = df_hs['lat'].mean()
                 self.coord_set = True
 
-            # 2. Hitung 90th Percentile HS
+            # 2. Calculate 90th Percentile HS
             hs_values = df_hs['val'].values
             hs_90 = np.percentile(hs_values, 90)
             
-            # Cari indeks piksel untuk mengambil SST di lokasi yang sama
+            # Find index of pixel closest to 90th percentile to get SST/SSTA at that specific point
             idx_p90 = (np.abs(hs_values - hs_90)).argmin()
             
-            # 3. Ambil SST & SSTA (Jika ada)
-            sst_val = -999.0
-            sst_min = -999.0
-            sst_max = -999.0
-            ssta_val = -999.0
+            # 3. Get SST & SSTA (Optional but recommended)
+            sst_val = -999.0; sst_min = -999.0; sst_max = -999.0; ssta_val = -999.0
             
             if file_sst and os.path.exists(file_sst):
                 try:
@@ -185,35 +219,33 @@ class RegionAnalyzer:
                     ssta_val = df_ssta['val'].iloc[idx_p90]
                 except: pass
 
-            # 4. Hitung DHW (Akumulasi)
+            # 4. Calculate DHW (Accumulation)
+            # DHW accumulates only if HS >= 1.0 degree C
             daily_stress = 0.0
             if hs_90 >= 1.0:
-                daily_stress = hs_90 / 7.0
+                daily_stress = hs_90 / 7.0 # Convert daily HS to weekly equivalent
             
             self.stress_window.append(daily_stress)
             current_dhw = sum(self.stress_window)
 
-            # 5. Hitung BAA (Logika Baru: Instantaneous -> 7-Day Max)
-            # Tentukan level alert instan hari ini
-            # 0: No Stress, 1: Watch, 2: Warning, 3: Alert Lvl 1, 4: Alert Lvl 2
+            # 5. Calculate BAA (Bleaching Alert Area)
+            # Logic: 0=No Stress, 1=Watch, 2=Warning, 3=Alert Lvl 1, 4=Alert Lvl 2
             daily_alert_level = 0
             
             if hs_90 <= 0.0:
-                daily_alert_level = 0 # No Stress
+                daily_alert_level = 0
             elif 0.0 < hs_90 < 1.0:
-                daily_alert_level = 1 # Watch
+                daily_alert_level = 1
             else: # hs_90 >= 1.0
                 if current_dhw < 4.0:
-                    daily_alert_level = 2 # Warning (Possible Bleaching)
+                    daily_alert_level = 2
                 elif 4.0 <= current_dhw < 8.0:
-                    daily_alert_level = 3 # Alert Level 1
+                    daily_alert_level = 3
                 elif current_dhw >= 8.0:
-                    daily_alert_level = 4 # Alert Level 2
+                    daily_alert_level = 4
 
-            # Masukkan ke window 7 hari
+            # Use 7-day rolling maximum for BAA
             self.baa_window.append(daily_alert_level)
-            
-            # Ambil nilai maksimum dalam 7 hari terakhir (Composite)
             final_baa = max(self.baa_window) if self.baa_window else 0
 
             return {
@@ -224,45 +256,58 @@ class RegionAnalyzer:
                 "ssta_90": ssta_val,
                 "hs_90": max(0, hs_90),
                 "dhw": current_dhw,
-                "baa": final_baa # Menggunakan hasil composite
+                "baa": final_baa
             }
         except Exception as e:
             print(f"Error reading daily file {file_hs}: {e}")
             return None
 
-# ==============================================================================
-# 4. MAIN EXECUTION
-# ==============================================================================
+# ==========================================
+# 4. MAIN EXECUTION FLOW
+# ==========================================
 def main():
-    if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
+    if not os.path.exists(DIRS["final_output"]):
+        os.makedirs(DIRS["final_output"])
 
-    # --- TAHAP 1: HITUNG CLIMATOLOGY ---
+    # --- PART 1: CLIMATOLOGY ---
     clim_data_store = calculate_climatology_data()
     
     if not clim_data_store:
-        print("⚠️  Peringatan: Data Climatology Kosong/Gagal. Melanjutkan dengan nilai default 0.")
+        print("⚠️  Warning: Climatology Calculation failed or returned empty.")
+        print("   Continuing with default values (0.0).")
 
-    # --- TAHAP 2: INVENTARISASI FILE HARIAN ---
+    # --- PART 2: DAILY ANALYSIS ---
     print("\n" + "="*50)
-    print(f"   MEMULAI ANALISIS HARIAN (Folder: {INPUT_FOLDER_XYZ})")
+    print(f"   STEP 2: DAILY ANALYSIS (Input: {DIRS['xyz_input']})")
     print("="*50)
     
+    if not os.path.exists(DIRS["xyz_input"]):
+        print(f"❌ Input folder not found: {DIRS['xyz_input']}")
+        print("   Please run the 'masking_to_xyz.py' script first.")
+        return
+
+    # Map files by Region -> Date -> Type (HS/SST/SSTA)
     files_map = {} 
     
-    # Scanning folder
-    for f in os.listdir(INPUT_FOLDER_XYZ):
+    for f in os.listdir(DIRS["xyz_input"]):
         if not f.endswith(".xyz"): continue
         
         name_lower = f.lower()
-        if "np_" in name_lower: region = "NP"
-        elif "gm_" in name_lower: region = "GM"
-        elif "gn_" in name_lower: region = "GN"
-        else: continue
+        
+        # Detect Region
+        region = None
+        for code in SITES.keys():
+            if f"{code.lower()}_" in name_lower:
+                region = code
+                break
+        if not region: continue
             
+        # Detect Date
         date_match = re.search(r"(\d{8})", f)
         if not date_match: continue
         date_str = date_match.group(1)
         
+        # Detect Type
         ftype = "UNKNOWN"
         if "hs" in name_lower and "hotspot" not in name_lower: ftype = "HS"
         elif "hotspot" in name_lower: ftype = "HS"
@@ -272,27 +317,24 @@ def main():
         if region not in files_map: files_map[region] = {}
         if date_str not in files_map[region]: files_map[region][date_str] = {}
         
-        files_map[region][date_str][ftype] = os.path.join(INPUT_FOLDER_XYZ, f)
+        files_map[region][date_str][ftype] = os.path.join(DIRS["xyz_input"], f)
 
-    # --- TAHAP 3: PROSES DAN TULIS LAPORAN ---
-    full_names = {"NP": "Nusa Penida", "GM": "Gili Matra", "GN": "Gita Nada"}
-    
+    # --- PART 3: GENERATE REPORTS ---
     for code, dates_dict in files_map.items():
-        region_fullname = full_names.get(code, code)
-        print(f"\n📈 Memproses Wilayah: {region_fullname} ({code})")
+        region_fullname = SITE_FULLNAMES.get(code, code)
+        print(f"\n📈 Processing Site: {region_fullname} ({code})")
         
-        # Ambil data climatology spesifik untuk region ini
-        # Jika tidak ada hasil hitungan, gunakan default
+        # Retrieve climatology data for this site
         site_clim = clim_data_store.get(code, {'mmm': 0.0, 'monthly_means': [0.0]*12})
         
         analyzer = RegionAnalyzer(region_fullname, code, site_clim)
         sorted_dates = sorted(dates_dict.keys())
         results_buffer = []
 
-        # Loop Harian
+        # Process Day by Day
         for d_str in sorted_dates:
             files = dates_dict[d_str]
-            if "HS" not in files: continue
+            if "HS" not in files: continue # HotSpot file is mandatory
             
             dt_obj = datetime.datetime.strptime(d_str, "%Y%m%d")
             data = analyzer.process_day(
@@ -303,10 +345,12 @@ def main():
             )
             if data: results_buffer.append(data)
 
-        if not results_buffer: continue
+        if not results_buffer:
+            print(f"   -> No valid data found for {code}")
+            continue
 
-        # Menulis File Output
-        output_filename = os.path.join(OUTPUT_FOLDER, f"{region_fullname.replace(' ','_')}_NOAA_Combined.txt")
+        # Write Report File
+        output_filename = os.path.join(DIRS["final_output"], f"{region_fullname.replace(' ','_')}_NOAA_Report.txt")
         
         with open(output_filename, "w") as f:
             # HEADER
@@ -317,26 +361,24 @@ def main():
             f.write("Polygon Middle Latitude:\n")
             f.write(f"{analyzer.center_lat:.4f} \n\n")
             
-            # --- DATA CLIMATOLOGY DARI HASIL HITUNGAN TAHAP 1 ---
+            # CLIMATOLOGY
             f.write("Averaged Maximum Monthly Mean:\n")
             f.write(f"{analyzer.mmm:.4f}\n\n")
-            
             f.write("Averaged Monthly Mean (Jan-Dec):\n")
-            # Format list menjadi string dengan spasi
             means_str = " ".join([f"{val:.4f}" for val in analyzer.monthly_means])
             f.write(f"{means_str}\n\n")
             
-            # --- TANGGAL VALID ---
+            # DATES
             first_dt = results_buffer[0]['date']
-            dhw_valid_dt = first_dt + datetime.timedelta(weeks=12) # 12 minggu
-            baa_valid_dt = dhw_valid_dt + datetime.timedelta(days=7) # +7 hari
+            dhw_valid_dt = first_dt + datetime.timedelta(weeks=12) 
+            baa_valid_dt = dhw_valid_dt + datetime.timedelta(days=7) 
             
             f.write("First Valid DHW Date:\n")
             f.write(f"{dhw_valid_dt.strftime('%Y %m %d')}\n\n")
             f.write("First Valid BAA Date:\n")
             f.write(f"{baa_valid_dt.strftime('%Y %m %d')}\n\n")
             
-            # TABEL DATA
+            # DATA TABLE
             header = "YYYY MM DD SST_MIN SST_MAX SST@90th_HS SSTA@90th_HS 90th_HS>0 DHW_from_90th_HS>1 BAA_7day_max"
             f.write(header + "\n")
             
@@ -352,10 +394,10 @@ def main():
                 )
                 f.write(line + "\n")
                 
-        print(f"✅ Laporan tersimpan: {output_filename}")
+        print(f"✅ Report saved: {output_filename}")
 
     print("\n" + "="*50)
-    print("PROSES SELESAI SEMUA")
+    print("ALL PROCESSES COMPLETED")
     print("="*50)
 
 if __name__ == "__main__":
