@@ -1,4 +1,3 @@
----
 
 # 🌊 Automated Pipeline: NOAA Coral Reef Watch Data Processing
 
@@ -13,7 +12,6 @@ This repository contains an automated Python workflow designed to download satel
 3. **Regional Clip:** Crop global data into a smaller, manageable region (Lombok).
 4. **Site Masking:** Clip data to specific conservation areas (Gili Matra, Gita Nada, Nusa Penida) and convert to `.xyz` format.
 
----
 
 ## ⚠️ MANDATORY PRE-REQUISITES
 
